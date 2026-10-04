@@ -1,0 +1,95 @@
+import numpy as np
+from scipy.integrate import solve_ivp
+
+
+def second_order_screening(k):
+    # Model parameters
+    k_f = 15e-5             # Mass-transfer coefficient [m/s]
+    a = 7e-5                # Particle radius [m]
+    D_A = 9.77285e-10       # Diffusion coefficient [m2/s]
+    epsilon_p = 0.6         # Particle porosity [-]
+    M = 6.5                 # Reagent excess [-]
+    beta = 0.05             # Particle-to-liquid volume ratio [-]
+    N_r = 350               # Number of radial grid points
+    C_ref = 270             # Reference concentration [mol/m3]
+
+    # Corrected diffusion coefficient
+    D_A = D_A * (epsilon_p / (2 - epsilon_p))**2
+    D_eff = D_A / epsilon_p
+
+    # Radial discretization
+    r = np.linspace(a * 0.001, a, N_r)
+    dr = r[1] - r[0]
+    a_v = 3 / a
+
+    # Initial concentrations
+    C_Bp0 = C_ref
+    C_A0 = C_Bp0 * beta * epsilon_p * M
+    C_Ap0 = np.zeros(N_r)
+    C_Bp0_profile = np.ones(N_r) * C_Bp0
+
+    # Scaled initial conditions
+    y0 = np.concatenate(([C_A0 / C_ref], C_Ap0 / C_ref, C_Bp0_profile / C_ref))
+
+    # Reaction-diffusion equations
+    def diffusion_odes(t, y):
+        C_A = y[0] * C_ref
+        C_Ap = y[1:N_r + 1] * C_ref
+        C_Bp = y[N_r + 1:] * C_ref
+
+        dC_Ap_dr = np.zeros(N_r)
+        d2C_Ap_dr2 = np.zeros(N_r)
+
+        # Interior points
+        dC_Ap_dr[1:-1] = (C_Ap[2:] - C_Ap[:-2]) / (2 * dr)
+        d2C_Ap_dr2[1:-1] = (C_Ap[2:] - 2 * C_Ap[1:-1] + C_Ap[:-2]) / dr**2
+
+        # Particle centre: symmetry condition
+        dC_Ap_dr[0] = 0
+        d2C_Ap_dr2[0] = (C_Ap[2] - 2 * C_Ap[1] + C_Ap[0]) / dr**2
+
+        # Particle surface: film mass-transfer boundary condition
+        dC_Ap_dr[-1] = (k_f / D_A) * (C_A - C_Ap[-1])
+        d2C_Ap_dr2[-1] = (C_Ap[-1] - 2 * C_Ap[-2] + C_Ap[-3]) / dr**2
+
+        # Reaction-diffusion equation inside the particle
+        dC_Ap_dt = (D_eff * (d2C_Ap_dr2 + (2 / r) * dC_Ap_dr) - k * C_Ap * C_Bp) / epsilon_p
+
+        # Bulk-phase mass balance
+        dC_A_dt = -k_f * a_v * beta * (C_A - C_Ap[-1])
+
+        # Solid-phase reactant consumption
+        dC_Bp_dt = -k * C_Ap * C_Bp
+
+        return np.concatenate(([dC_A_dt / C_ref], dC_Ap_dt / C_ref, dC_Bp_dt / C_ref))
+
+    # Simulation time and numerical integration
+    t_max = 15 * (a**2 / D_A + 1 / (k * C_A0))
+    criteria = 0.45 * dr**2 * epsilon_p / D_A
+    t_eval = np.linspace(0, t_max, 100)
+
+    solution = solve_ivp(diffusion_odes, (0, t_max), y0, t_eval=t_eval, method="LSODA",
+                         first_step=criteria, max_step=1 / (k * C_Bp0))
+
+    # Recover concentrations
+    C_A = solution.y[0, :] * C_ref
+    C_Ap = solution.y[1:N_r + 1, :] * C_ref
+    C_Bp = solution.y[N_r + 1:, :] * C_ref
+
+    # Volume-averaged concentration of Bp
+    average_C_Bp = (3 / a**3) * np.trapezoid(C_Bp * r[:, np.newaxis]**2, r, axis=0)
+
+    # Time required to reach 99% conversion
+    target_C_Bp = 0.01 * C_Bp0
+    idx = np.where(average_C_Bp <= target_C_Bp)[0]
+    time_at_target = t_eval[idx[0]] if len(idx) > 0 else 9999
+
+    # Mass-balance error
+    expected = (C_A0 - C_A0 / M) / (1 + beta * epsilon_p)
+    final = C_A[-1]
+    balance_error = 100 * (expected - final) / expected
+
+    # Reaction-diffusion parameter
+    hT2 = k * C_ref * a**2 / D_A
+
+    return solution.t, C_A, C_Ap, C_Bp, time_at_target * D_A / a**2, hT2, balance_error
