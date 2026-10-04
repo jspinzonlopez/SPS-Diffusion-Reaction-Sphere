@@ -30,4 +30,4 @@ The code was used for the numerical simulations and sensitivity analysis reporte
 
 ## Citation
 
-Please cite the associated publication when using this code-
+Please cite the associated publication when using this code.
